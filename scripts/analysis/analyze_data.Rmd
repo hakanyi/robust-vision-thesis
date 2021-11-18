@@ -1,0 +1,436 @@
+---
+title: "pilot"
+output:
+  pdf_document: default
+  html_document:
+df_print: paged
+header-includes:
+ \usepackage{booktabs}
+ \usepackage{longtable}
+ \usepackage{array}
+ \usepackage{multirow}
+ \usepackage{wrapfig}
+ \usepackage{float}
+ \floatplacement{figure}{H}
+
+---
+
+# Pilot
+
+```{r global-options, include=FALSE}
+knitr::opts_chunk$set(fig.pos = 'H', 
+                      echo=TRUE, warning=FALSE, message=FALSE)
+```
+
+# Includes
+
+```{r includes}
+library(tidyverse)
+library(estimatr)
+library(ggplot2)
+library(readr)
+library(broom)
+library(viridis)
+
+
+th <- theme_classic()
+theme_set(th)
+```
+
+# Load behavioral data and covariates
+
+```{r load}
+csv_dir = "pixeldiffs-equated"
+
+keeps <- c('RT', 'TrialName', 'Response', 'WID', 'presentation_time',
+           'type', 'same_gt', 'same_response', 'idx', 'flipped')
+data <-
+  list.files(path=file.path("behavioral_data", csv_dir), pattern = "*.csv", 
+                            full.names = TRUE, recursive = TRUE) %>% 
+  map_df(~read_csv(., show_col_types = FALSE)) %>%
+  subset(select = keeps) %>%
+  rename(name = TrialName, 
+         time.presentation = presentation_time,
+         scene = idx) %>%
+  mutate(correct = !xor(same_gt, same_response))
+
+# keep 150, 250, or 350 presentation times
+data <- data %>%
+  filter(time.presentation %in% c(150,250,350))
+
+drops <- c('stim_time', 'mask_time')
+covariates <- read_csv(file.path("covariates", csv_dir, "movies_output.csv"))
+covariates <- covariates[,!(names(covariates) %in% drops)]
+
+unfiltered <- data %>%
+  left_join(covariates, by = c("name"))
+
+if (csv_dir == "pixeldiffs-unequated") {
+  # exclude 09_...mp4 as it has super large pixel distance 
+  unfiltered <- unfiltered %>%
+    filter(!grepl("09_", name))
+}
+```
+## Mark trials with suspicious z-scores
+```{r}
+# unfiltered <- unfiltered %>%
+#   mutate(RT.zscore = scale(RT)) %>%
+#   mutate(high.zscore = abs(RT.zscore >= 3))
+RT.zscore <- ave(unfiltered$RT, unfiltered$WID, FUN = scale)
+unfiltered$high.zscore = abs(RT.zscore) >= 3 | unfiltered$RT > 6000
+```
+
+# Visualizations of the raw data
+
+## Reaction times for each trial per subject
+```{r}
+unfiltered %>%
+  ggplot(aes(x = RT, y = WID)) +
+  geom_point(aes(col = high.zscore))
+
+unfiltered %>%
+  filter(high.zscore) %>%
+  group_by(WID) %>%
+  summarize(n.excluded = n()) %>%
+  print()
+```
+
+# Filter data
+Exclude subjects whose number of hits in the different trials are less than 1.5 times the number of false positives in the same trials. Then, exclude trials whose reaction times wrt to an individual subject are too extreme, i.e., abs(zscore) >= 3.
+
+```{r}
+by_subj <- unfiltered %>%
+  group_by(WID)
+
+hr_by_subj <- by_subj %>%
+  filter(!same_gt) %>%
+  summarise(hr = mean(correct))
+
+fp_by_subj <- by_subj %>%
+  filter(same_gt) %>%
+  summarise(fp = 1.0 - mean(correct))
+
+subject_performance <- hr_by_subj %>%
+  left_join(fp_by_subj, by = "WID")
+
+passed_subjects <- subject_performance %>%
+  filter(hr > 1.5*fp)
+
+filtered <- passed_subjects %>%
+  left_join(unfiltered, by = "WID") %>%
+  filter(!high.zscore)
+
+filtered %>%
+  group_by(time.presentation, flipped) %>%
+  summarize(n.good_subjects = n_distinct(WID)) %>%
+  print()
+```
+
+# Analysis: hit rate by trial
+
+## Dataframe preparation
+```{r}
+by_trial <- filtered %>%
+  group_by(scene, type, time.presentation, flipped)
+
+# hit rate
+hr_by_trial <- by_trial %>%
+  filter(!same_gt) %>%
+  summarize(rate.hit = mean(correct),
+            rate.hit.se = sd(correct) / sqrt(length(correct)),
+            dist.pixel = mean(`pixel-distance`),
+            dist.light = mean(`light-distance`),
+            dist.mesh = mean(`mesh-distance`),
+            dist.pose = mean(`posevec-distance`),
+            dist.shape = mean(`shapevec-distance`))
+
+# false alarm rate
+fa_by_trial <- by_trial %>%
+  filter(same_gt) %>%
+  summarize(rate.fa = 1 - mean(correct)) %>%
+  subset(select = -c(type))
+
+# dprime
+dprime_by_trial <- hr_by_trial %>%
+  left_join(fa_by_trial, by = c("scene", "time.presentation", "flipped")) %>%
+  mutate(d.prime = qnorm(rate.hit*0.999 + 0.0001) - qnorm(rate.fa*0.999 + 0.0001))
+```
+
+## hit rate
+
+### plots
+```{r}
+fa_by_trial %>%
+  group_by(time.presentation, flipped) %>%
+  summarize(mean = mean(rate.fa)) %>%
+  ggplot(aes(x = time.presentation, y = mean)) +
+  geom_bar(stat = "identity") +
+  facet_wrap( ~ flipped) +
+  ggtitle("False alarm rate as a function of presentation time")
+
+bar_plot <- function(.data, y, ylim, ylabel){
+  .data %>%
+    group_by(type, flipped) %>%
+    summarize(mean = mean(!! sym(y)),
+              se = sd(!! sym(y)) / sqrt(length(!! sym(y))),
+              ci = abs(qnorm((1-0.95)/2))* sd(!! sym(y))/sqrt(length(!! sym(y)))) %>%
+    ggplot(aes(x = type)) +
+    geom_bar(aes(y=mean, fill = type), stat="identity") +
+    ylim(ylim) +
+    geom_linerange(aes(ymin=mean-ci, ymax=mean+ci)) +
+    labs(x="Cause of visual change", y=ylabel) + 
+    scale_fill_brewer(palette = "Accent") +
+    theme(legend.position = "none") + 
+    scale_x_discrete(breaks=c("different-light","different-posture"),
+        labels=c("light", "posture"))
+}
+
+w = 40 
+h = 66.73
+svg(file='upright_accuracy.svg',width=w*0.039370,height=h*0.039370,pointsize=7)
+hr_by_trial %>%
+  filter(!flipped) %>%
+  bar_plot("rate.hit", c(0, 1), "Detection Accuracy")
+dev.off()
+
+svg(file='upright_dprime.svg',width=w*0.039370,height=h*0.039370,pointsize=7)
+dprime_by_trial %>%
+  filter(!flipped) %>%
+  bar_plot("d.prime", c(0,2), "Detection Sensitivity d`") 
+dev.off()
+
+svg(file='flipped_accuracy.svg',width=w*0.039370,height=h*0.039370,pointsize=7)
+hr_by_trial %>%
+  filter(flipped) %>%
+  bar_plot("rate.hit", c(0, 1), "Detection Accuracy")
+dev.off()
+
+svg(file='flipped_dprime.svg',width=w*0.039370,height=h*0.039370,pointsize=7)
+dprime_by_trial %>%
+  filter(flipped) %>%
+  bar_plot("d.prime", c(0,2), "Detection Sensitivity d`") 
+dev.off()
+
+hr_by_trial %>%
+  ggplot(aes(x = dist.pixel, y = rate.hit, col = type)) +
+  geom_text(aes(label = scene), 
+            size = 2) #+
+  #facet_wrap( ~ time.presentation)
+```
+
+```{r}
+corr_plot <- function(.data, x, y, xlabel, ylabel) {
+  .data %>%
+    ggplot(aes(x = !! sym(x), y = !! sym(y), fill = type)) + 
+    geom_point(aes(color = type)) + 
+    geom_smooth(method = "lm") +
+    labs(x=xlabel, y=ylabel) + 
+    scale_fill_brewer(palette = "Accent") +
+    scale_color_brewer(palette = "Accent") +
+    theme(legend.position = "none") + 
+    # theme(axis.title.x = element_blank(),
+    #       axis.title.y = element_blank()) +
+    ylim(c(0,3))
+}
+
+hr_by_trial %>% 
+  filter(!flipped) %>%
+  corr_plot("dist.pixel", "rate.hit", "pixel distance", "accuracy")
+hr_by_trial %>%
+  filter(!flipped) %>%
+  corr_plot("dist.light", "rate.hit", "light distance", "accuracy")
+hr_by_trial %>%
+  filter(!flipped) %>%
+  corr_plot("dist.mesh", "rate.hit", "mesh distance", "accuracy")
+
+w = 50
+h = 38
+svg(file='upright_pixel.svg',width=w*0.039370,height=h*0.039370,pointsize=7)
+dprime_by_trial %>% 
+  filter(!flipped) %>%
+  corr_plot("dist.pixel", "d.prime", "pixel distance", "d`")
+# ggsave("upright_pixel.pdf", width = 43, height = 31, units = "mm")
+dev.off()
+svg(file='upright_light.svg',width=w*0.039370,height=h*0.039370,pointsize=7)
+dprime_by_trial %>%
+  filter(!flipped) %>%
+  corr_plot("dist.light", "d.prime", "light distance (deg)", "d`")
+dev.off()
+svg(file='upright_mesh.svg',width=w*0.039370,height=h*0.039370,pointsize=7)
+dprime_by_trial %>%
+  filter(!flipped) %>%
+  corr_plot("dist.mesh", "d.prime", "mesh distance", "d`")
+dev.off()
+
+svg(file='flipped_pixel.svg',width=w*0.039370,height=h*0.039370,pointsize=7)
+dprime_by_trial %>% 
+  filter(flipped) %>%
+  corr_plot("dist.pixel", "d.prime", "pixel distance", "d`")
+# ggsave("upright_pixel.pdf", width = 43, height = 31, units = "mm")
+dev.off()
+svg(file='flipped_light.svg',width=w*0.039370,height=h*0.039370,pointsize=7)
+dprime_by_trial %>%
+  filter(flipped) %>%
+  corr_plot("dist.light", "d.prime", "light distance (deg)", "d`")
+dev.off()
+svg(file='flipped_mesh.svg',width=w*0.039370,height=h*0.039370,pointsize=7)
+dprime_by_trial %>%
+  filter(flipped) %>%
+  corr_plot("dist.mesh", "d.prime", "mesh distance", "d`") +
+  ylim(c(0,3))
+dev.off()
+
+# dprime_by_trial %>%
+#   group_by(time.presentation, type) %>%
+#   summarize(mean = mean(dist.pixel),
+#             sd = sd(dist.pixel)) 
+
+```
+
+## model-free statistics
+
+```{r}
+t.test(filter(hr_by_trial, !flipped)$rate.hit, mu = 0.5)
+t.test(filter(hr_by_trial, !flipped & type == "different-posture")$rate.hit, mu = 0.5)
+t.test(filter(hr_by_trial, !flipped & type == "different-light")$rate.hit, mu = 0.5)
+t.test(filter(hr_by_trial, !flipped & type == "different-posture")$rate.hit, 
+       filter(hr_by_trial, !flipped & type == "different-light")$rate.hit,
+       paired = TRUE, alternative = "two.sided")
+t.test(filter(dprime_by_trial, !flipped & type == "different-posture")$d.prime, 
+       filter(dprime_by_trial, !flipped & type == "different-light")$d.prime,
+       paired = TRUE, alternative = "two.sided")
+```
+
+```{r}
+t.test(filter(hr_by_trial, flipped)$rate.hit, mu = 0.5)
+t.test(filter(hr_by_trial, flipped & type == "different-posture")$rate.hit, mu = 0.5)
+t.test(filter(hr_by_trial, flipped & type == "different-light")$rate.hit, mu = 0.5)
+t.test(filter(hr_by_trial, flipped & type == "different-posture")$rate.hit, 
+       filter(hr_by_trial, flipped & type == "different-light")$rate.hit,
+       paired = TRUE, alternative = "two.sided")
+t.test(filter(dprime_by_trial, flipped & type == "different-posture")$d.prime, 
+       filter(dprime_by_trial, flipped & type == "different-light")$d.prime,
+       paired = TRUE, alternative = "two.sided")
+```
+
+```{r}
+t.test(filter(dprime_by_trial, flipped & type == "different-posture")$d.prime, 
+       filter(dprime_by_trial, !flipped & type == "different-posture")$d.prime,
+       paired = TRUE, alternative = "two.sided")
+
+t.test(filter(dprime_by_trial, flipped & type == "different-light")$d.prime, 
+       filter(dprime_by_trial, !flipped & type == "different-light")$d.prime,
+       paired = TRUE, alternative = "two.sided")
+```
+
+
+```{r}
+hr_by_trial %>%
+  nest(data = -time.presentation) %>% 
+    mutate(model = map(data, ~lm(rate.hit~dist.pixel + type, data = .)), 
+           tidied = map(model, tidy)) %>% 
+    unnest(tidied)
+
+hr_by_trial %>%
+  with(lm(rate.hit ~ dist.pixel + dist.light + dist.mesh + type)) %>%
+  summary()
+
+dprime_by_trial %>%
+  with(lm(d.prime ~ dist.pixel + dist.light + dist.mesh + type)) %>%
+  summary()
+```
+```{r}
+dprime_by_trial %>%
+  filter(type == "different-posture") %>%
+  with(lm(d.prime ~ dist.mesh)) %>%
+  summary()
+
+dprime_by_trial %>%
+  filter(type == "different-posture") %>%
+  with(lm(rate.hit ~ dist.mesh)) %>%
+  summary()
+```
+
+```{r}
+dprime_by_trial %>%
+  filter(type == "different-posture" & !flipped) %>%
+  with(lm(d.prime ~ dist.pixel)) %>%
+  summary()
+dprime_by_trial %>%
+  filter(type == "different-posture" & !flipped) %>%
+  with(lm(d.prime ~ dist.mesh)) %>%
+  summary()
+
+dprime_by_trial %>%
+  filter(type == "different-light" & !flipped) %>%
+  with(lm(d.prime ~ dist.pixel)) %>%
+  summary()
+dprime_by_trial %>%
+  filter(type == "different-light" & !flipped) %>%
+  with(lm(d.prime ~ dist.light)) %>%
+  summary()
+```
+
+```{r}
+dprime_by_trial %>%
+  filter(type == "different-posture" & flipped) %>%
+  with(lm(d.prime ~ dist.pixel)) %>%
+  summary()
+dprime_by_trial %>%
+  filter(type == "different-posture" & flipped) %>%
+  with(lm(d.prime ~ dist.mesh)) %>%
+  summary()
+
+dprime_by_trial %>%
+  filter(type == "different-light" & flipped) %>%
+  with(lm(d.prime ~ dist.pixel)) %>%
+  summary()
+dprime_by_trial %>%
+  filter(type == "different-light" & flipped) %>%
+  with(lm(d.prime ~ dist.light)) %>%
+  summary()
+```
+
+```{r}
+# hr_by_trial %>%
+#   filter(time.presentation == 150) %>%
+#   with(lm(rate.hit ~ dist.pixel + type)) %>%
+#   summary()
+# 
+# hr_by_trial %>%
+#   filter(time.presentation == 250) %>%
+#   with(lm(rate.hit ~ dist.pixel + type)) %>%
+#   summary()
+# 
+# hr_by_trial %>%
+#   filter(time.presentation == 350) %>%
+#   with(lm(rate.hit ~ dist.pixel + type)) %>%
+#   summary()
+```
+
+# Analysis with dprime
+
+## Plots
+```{r}
+dprime_by_trial %>%
+  group_by(type, time.presentation) %>%
+  summarize(mean = mean(d.prime),
+            se = sd(d.prime) / sqrt(length(d.prime))) %>%
+  ggplot(aes(x = type)) +
+  geom_bar(aes(y=mean), stat="identity") +
+  ylim(0, 1) +
+  geom_errorbar(aes(ymin=mean-se, ymax=mean+se)) +
+  facet_wrap( ~ time.presentation) + 
+  ggtitle("Hit rate as a function of change type")
+
+dprime_by_trial %>% 
+  corr_plot("dist.pixel", "d.prime", "pixel distance")
+dprime_by_trial %>%
+  corr_plot("dist.light", "d.prime", "light distance")
+dprime_by_trial %>%
+  corr_plot("dist.mesh", "d.prime", "mesh distance")
+dprime_by_trial %>%
+  corr_plot("dist.pose", "d.prime", "pose-vec distance")
+dprime_by_trial %>%
+  corr_plot("dist.shape", "d.prime", "shape-vec distance")
+```

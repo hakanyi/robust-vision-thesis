@@ -1,0 +1,17 @@
+{
+  "Description" : "Change detection experiment with mooney bodies. Pixel differences are equated for in this version.",
+  "ImageResolution" : 256,
+  "CameraAzimuth" : 20,
+  "CameraElevation" : 15,
+  "CameraDistance" : 3.5,
+  "CameraTranslation" : [0,-0.25,0],
+  "LampOrigin" : [1, 2, 0],
+  "LampUpVector" : [1, 0, 0],
+  "LampRadiance" : 10,
+  "RendererMaxDepth" : 3,
+  "RendererSamplesPerPixel" : 32,
+  "StimulusNameFormat" : "h36m",
+  "h36mPath" : "data/h36m_train.npz",
+  "smplDir" : "data/smpl",
+  "csv_folders": ["sample-lights-1", "sample-lights-2", "sample-lights-3"]
+}

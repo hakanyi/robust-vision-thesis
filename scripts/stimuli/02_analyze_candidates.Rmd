@@ -1,0 +1,58 @@
+---
+title: "render_samples"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r includes}
+library(tidyverse)
+library(estimatr)
+library(ggplot2)
+library(readr)
+
+th <- theme_classic()
+theme_set(th)
+```
+
+## Load data
+```{r dataload}
+csv_dir = "sample-lights-3"
+data <-
+  list.files(path=csv_dir, pattern = "^[0-9][0-9]?.csv", full.names = TRUE) %>% 
+  map_df(~read_csv(., show_col_types = FALSE))
+```
+
+``` {r}
+data <- data %>%
+  group_by(scene) %>%
+  mutate(sample_id = 0:(n()-1))
+```
+
+## Some visualizations
+```{r plot}
+data %>%
+  group_by(scene) %>%
+  summarize(mean = mean(pixel_distance_posture),
+            sd = sd(pixel_distance_posture)) %>%
+  ggplot(aes(x = scene, y = mean)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd)) +
+  ggtitle("Mean pixel distances when pose changes (for many light samples)")
+
+# how many scenes are between 6 and 12 on average AND have a matched light pair?
+good_pairs <- data %>%
+  mutate(matched = pixel_distance_ratio > 1 & pixel_distance_ratio < 1.1) %>%
+  filter(matched, pixel_distance_posture >= 6 & pixel_distance_posture < 12) %>%
+  arrange(scene, pixel_distance_ratio) %>%
+  print
+
+write_csv(good_pairs, file.path(csv_dir, "candidate_pairs.csv"))
+
+good_pairs %>%
+  group_by(scene) %>%
+  summarize(n.good_pairs = n()) %>%
+  print
+```
